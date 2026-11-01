@@ -60,23 +60,12 @@ or 2–4 cm entry distance do not start a booked stay.
 
 ## Customer and administrator access
 
-The app reads the Firebase Authentication custom claim `admin: true` to choose
-the administrator view. Users without that claim receive the customer view and
-subscribe only to their own `bookings/{uid}` data. Admins get parking logs,
-staff, every booking, and an eight-week usage chart with visits, average stay,
-and completed booking charges.
-
-Grant the claim only from a trusted server or Firebase Admin SDK environment,
-never from the browser. For example, in a trusted Node.js process after
-initializing the Firebase Admin SDK:
-
-```js
-await getAuth().setCustomUserClaims("FIREBASE_AUTH_UID", { admin: true });
-```
-
-Then have that administrator sign out and back in to refresh the ID token. The
-database rules independently enforce the same boundary. The UI role check is
-not a substitute for Firebase rules.
+The verified Firebase Authentication account `baloyibasani@gmail.com` receives
+the administrator view. Other signed-in users receive the customer view and
+subscribe only to their own `bookings/{uid}` data. Admin access to logs, staff,
+all bookings, and the usage chart is restricted by the Realtime Database rules
+to that same verified email. If the account's email is not verified, verify it
+in Firebase Authentication before signing in again.
 
 ## GitHub Pages
 

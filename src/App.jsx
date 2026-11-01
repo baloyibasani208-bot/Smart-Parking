@@ -8,6 +8,7 @@ import { auth, db } from "./firebase";
 import { PARKING_SLOTS, seedDatabase } from "./seed";
 
 /* ---------- helpers ---------- */
+const ADMIN_EMAIL = "baloyibasani@gmail.com";
 const ERR = {
   "auth/invalid-credential": "Wrong email or password.",
   "auth/user-not-found": "No account with that email.",
@@ -540,7 +541,9 @@ export default function App() {
       if (!currentUser) return;
       try {
         const token = await getIdTokenResult(currentUser);
-        if (currentRequest === requestId) setIsAdmin(token.claims.admin === true);
+        const isBasani = token.claims.email_verified === true
+          && String(token.claims.email || "").toLowerCase() === ADMIN_EMAIL;
+        if (currentRequest === requestId) setIsAdmin(isBasani);
       } catch {
         if (currentRequest === requestId) setIsAdmin(false);
       } finally {

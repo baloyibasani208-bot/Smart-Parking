@@ -4,27 +4,27 @@
     ".write": false,
     "parking": {
       ".read": "auth != null",
-      ".write": "auth != null && (auth.token.admin == true || auth.token.sensor == true)"
+      ".write": "auth != null && ((auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true) || auth.token.sensor == true)"
     },
     "logs": {
-      ".read": "auth != null && auth.token.admin == true",
-      ".write": "auth != null && (auth.token.admin == true || auth.token.sensor == true)"
+      ".read": "auth != null && auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true",
+      ".write": "auth != null && ((auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true) || auth.token.sensor == true)"
     },
     "staff": {
-      ".read": "auth != null && auth.token.admin == true",
-      ".write": "auth != null && auth.token.admin == true"
+      ".read": "auth != null && auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true",
+      ".write": "auth != null && auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true"
     },
     "bookings": {
-      ".read": "auth != null && auth.token.admin == true",
+      ".read": "auth != null && auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true",
       "$uid": {
-        ".read": "auth != null && (auth.uid == $uid || auth.token.admin == true)",
-        ".write": "auth != null && (auth.uid == $uid || auth.token.admin == true)"
+        ".read": "auth != null && (auth.uid == $uid || (auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true))",
+        ".write": "auth != null && (auth.uid == $uid || (auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true))"
       }
     },
     "bookingLocks": {
       "$slot": {
         ".read": "auth != null",
-        ".write": "auth != null && (auth.token.admin == true || newData.child('uid').val() == auth.uid || data.child('uid').val() == auth.uid)",
+        ".write": "auth != null && (auth.token.email == 'baloyibasani@gmail.com' && auth.token.email_verified == true || newData.child('uid').val() == auth.uid || data.child('uid').val() == auth.uid)",
         ".validate": "!newData.exists() || (newData.hasChildren(['uid', 'bookingId', 'bookedAt']) && newData.child('uid').isString() && newData.child('bookingId').isString() && newData.child('bookedAt').isNumber())"
       }
     },
