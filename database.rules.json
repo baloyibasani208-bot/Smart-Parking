@@ -1,0 +1,36 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "parking": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.token.admin == true || auth.token.sensor == true)"
+    },
+    "logs": {
+      ".read": "auth != null && auth.token.admin == true",
+      ".write": "auth != null && (auth.token.admin == true || auth.token.sensor == true)"
+    },
+    "staff": {
+      ".read": "auth != null && auth.token.admin == true",
+      ".write": "auth != null && auth.token.admin == true"
+    },
+    "bookings": {
+      ".read": "auth != null && auth.token.admin == true",
+      "$uid": {
+        ".read": "auth != null && (auth.uid == $uid || auth.token.admin == true)",
+        ".write": "auth != null && (auth.uid == $uid || auth.token.admin == true)"
+      }
+    },
+    "bookingLocks": {
+      "$slot": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.token.admin == true || newData.child('uid').val() == auth.uid || data.child('uid').val() == auth.uid)",
+        ".validate": "!newData.exists() || (newData.hasChildren(['uid', 'bookingId', 'bookedAt']) && newData.child('uid').isString() && newData.child('bookingId').isString() && newData.child('bookedAt').isNumber())"
+      }
+    },
+    "bookingByCard": {
+      ".read": false,
+      ".write": false
+    }
+  }
+}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  updateProfile, signOut,
+  onIdTokenChanged, getIdTokenResult, signInWithEmailAndPassword,
+  createUserWithEmailAndPassword, updateProfile, signOut,
 } from "firebase/auth";
 import { ref, onValue, query, orderByChild, limitToLast, set, remove, push, runTransaction } from "firebase/database";
 import { auth, db } from "./firebase";
@@ -31,8 +31,8 @@ const fDur = (ms) => {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 };
 const PARKING_RATE = 25;
-const HOUR_MS = 60 * 60 * 1000;
-const chargeFor = (ms, rate = PARKING_RATE) => Math.max(1, Math.ceil(ms / HOUR_MS)) * rate;
+const BILLING_MINUTE_MS = 60 * 1000;
+const chargeFor = (ms, rate = PARKING_RATE) => Math.max(1, Math.ceil(ms / BILLING_MINUTE_MS)) * rate;
 const fMoney = (amount) => new Intl.NumberFormat("en-ZA", { style: "currency", currency: "ZAR" }).format(amount);
 const dayLabel = (k) => { const [y, m, d] = k.split("-").map(Number); return fDate(new Date(y, m - 1, d).getTime()); };
 
@@ -154,11 +154,176 @@ function DayChart({ logs }) {
   );
 }
 
+function WeeklyTrend({ sessions, bookings, now }) {
+  const weeks = useMemo(() => {
+    const currentWeek = new Date(now);
+    currentWeek.setHours(0, 0, 0, 0);
+    currentWeek.setDate(currentWeek.getDate() - ((currentWeek.getDay() + 6) % 7));
+    const data = Array.from({ length: 8 }, (_, index) => {
+      const start = new Date(currentWeek);
+      start.setDate(start.getDate() - (7 * (7 - index)));
+      const end = new Date(start);
+      end.setDate(end.getDate() + 7);
+      return { start: start.getTime(), end: end.getTime(), sessions: 0, stayMs: 0, revenue: 0 };
+    });
+    sessions.forEach((session) => {
+      const week = data.find((item) => session.inT >= item.start && session.inT < item.end);
+      if (week) {
+        week.sessions += 1;
+        week.stayMs += Math.max(0, (session.outT || now) - session.inT);
+      }
+    });
+    bookings.forEach((booking) => {
+      if (!booking.finishedAt || !booking.charged) return;
+      const week = data.find((item) => booking.finishedAt >= item.start && booking.finishedAt < item.end);
+      if (week) week.revenue += booking.charged;
+    });
+    return data;
+  }, [sessions, bookings, now]);
+  const maxSessions = Math.max(1, ...weeks.map((week) => week.sessions));
+  const totalSessions = weeks.reduce((total, week) => total + week.sessions, 0);
+  const totalRevenue = weeks.reduce((total, week) => total + week.revenue, 0);
+
+  return (
+    <div className="weekly-trend">
+      <div className="trend-summary"><span><b>{totalSessions}</b> visits in 8 weeks</span><span><b>{fMoney(totalRevenue)}</b> recorded charges</span></div>
+      <div className="trend-bars">
+        {weeks.map((week) => <div className="trend-week" key={week.start}>
+          <b className="trend-count">{week.sessions}</b>
+          <div className="trend-bar-track"><span style={{ height: `${Math.max(week.sessions ? 8 : 2, (week.sessions / maxSessions) * 100)}%` }} /></div>
+          <span className="trend-date">{new Date(week.start).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}</span>
+          <small>{week.sessions ? fDur(week.stayMs / week.sessions) : "No stays"}<br />{fMoney(week.revenue)}</small>
+        </div>)}
+      </div>
+      <div className="legend"><span><i style={{ background: "#42764d" }} />Visits</span><span>Average stay · recorded booking charges per week</span></div>
+    </div>
+  );
+}
+
+function CustomerDashboard({ user }) {
+  const [parking, setParking] = useState({});
+  const [bookings, setBookings] = useState({});
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [rfidCard, setRfidCard] = useState("");
+  const [bookingMinutes, setBookingMinutes] = useState(1);
+  const now = useNow();
+
+  useEffect(() => {
+    const unsubscribeParking = onValue(ref(db, "parking"), (snapshot) => setParking(snapshot.val() || {}), (error) => setMessage(error.message));
+    const unsubscribeBookings = onValue(ref(db, `bookings/${user.uid}`), (snapshot) => setBookings(snapshot.val() || {}), (error) => setMessage(error.message));
+    return () => { unsubscribeParking(); unsubscribeBookings(); };
+  }, [user.uid]);
+
+  const myBookings = Object.entries(bookings).map(([id, booking]) => ({ id, ...booking }))
+    .sort((a, b) => (b.bookedAt || 0) - (a.bookedAt || 0));
+  const currentBooking = myBookings.find((booking) => booking.status === "reserved" || booking.status === "active");
+  const availableSlots = PARKING_SLOTS.filter((id) => parking[id] === "Free");
+  const completedBookings = myBookings.filter((booking) => booking.status === "completed");
+  const totalCharged = completedBookings.reduce((total, booking) => total + (booking.charged || 0), 0);
+  const name = user.displayName || user.email;
+
+  const bookSlot = async (slot) => {
+    const card = rfidCard.trim().toUpperCase().replace(/[^0-9A-F]/g, "");
+    if (currentBooking || parking[slot] !== "Free") return;
+    if (!/^[0-9A-F]{4,16}$/.test(card)) return setMessage("Enter a valid RFID card number (4–16 hexadecimal characters).");
+    if (!Number.isInteger(Number(bookingMinutes)) || bookingMinutes < 1 || bookingMinutes > 24) return setMessage("Choose a booking duration from 1 to 24 demo minutes.");
+    setBusy(slot); setMessage("");
+    const bookingRef = push(ref(db, `bookings/${user.uid}`));
+    const lockRef = ref(db, `bookingLocks/${slot}`);
+    const bookedAt = Date.now();
+    try {
+      const lock = await runTransaction(lockRef, (current) => current == null
+        ? { uid: user.uid, bookingId: bookingRef.key, bookedAt }
+        : undefined, { applyLocally: false });
+      if (!lock.committed) throw new Error("That spot was just reserved. Please choose another.");
+      try {
+        await set(bookingRef, {
+          slot,
+          status: "reserved",
+          bookedAt,
+          ratePerHour: PARKING_RATE,
+          rfidCard: card,
+          requestedMinutes: Number(bookingMinutes),
+          requestedHours: Number(bookingMinutes),
+          customerName: user.displayName || "",
+          customerEmail: user.email || "",
+        });
+      } catch (error) {
+        await runTransaction(lockRef, (current) => current?.bookingId === bookingRef.key ? null : undefined);
+        throw error;
+      }
+      setMessage(`${slot} is reserved. Check in when you park to start your timer.`);
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  };
+
+  const cancelBooking = async (booking) => {
+    setBusy(booking.id); setMessage("");
+    try {
+      const result = await runTransaction(ref(db, `bookings/${user.uid}/${booking.id}`), (current) =>
+        current?.status === "reserved" ? { ...current, status: "cancelled", cancelledAt: Date.now() } : undefined);
+      if (!result.committed) throw new Error("Only a reservation that has not started can be cancelled.");
+      await runTransaction(ref(db, `bookingLocks/${booking.slot}`), (current) => current?.bookingId === booking.id ? null : undefined);
+      setMessage("Reservation cancelled.");
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  };
+
+  return (
+    <div className="app">
+      <header className="top">
+        <div className="logo dark"><CarIcon size={24} /> SmartPark</div>
+        <div className="who"><div className="avatar">{(name || "?")[0].toUpperCase()}</div><span className="hide-sm">{name}</span><span className="role-label">Customer</span><button className="btn ghost" onClick={() => signOut(auth)}>Sign out</button></div>
+      </header>
+      <main className="wrap">
+        <div className="title-row"><div><h1>My parking</h1><p className="muted">Reserve a space and keep track of your parking stays and charges.</p></div></div>
+        {message && <div className="notice" role="status">{message}</div>}
+        <section className="stats customer-stats">
+          <div className="stat"><span>Current stay</span><b className="stat-small">{currentBooking?.status === "active" ? fDur(now - currentBooking.startedAt) : currentBooking?.status === "reserved" ? "Reserved" : "—"}</b></div>
+          <div className="stat"><span>Completed stays</span><b>{completedBookings.length}</b></div>
+          <div className="stat"><span>Total charged</span><b className="stat-small">{fMoney(totalCharged)}</b></div>
+        </section>
+        <section className="card booking-panel">
+          <div className="booking-heading"><div><h3>{currentBooking ? "Your parking" : "Book a parking space"}</h3><p className="muted">Demo billing: each real minute counts as one parking hour at {fMoney(PARKING_RATE)} per hour.</p></div><span className="rate-label">{fMoney(PARKING_RATE)} / hour</span></div>
+          {currentBooking ? (
+            <div className="active-booking">
+              <div className="booking-status"><span className={"pill " + (currentBooking.status === "active" ? "green" : currentBooking.status === "card_in_use" ? "red" : "amber")}>{currentBooking.status === "active" ? "Parked now" : currentBooking.status === "card_in_use" ? "Card already booked" : "Awaiting RFID + sensor"}</span><b>{currentBooking.slot}</b></div>
+              {currentBooking.status === "active" ? <>
+                <div className="booking-cost"><span>Parked since</span><b>{fDate(currentBooking.startedAt)} · {fTime(currentBooking.startedAt)}</b><span>RFID card</span><b>{currentBooking.rfidCard}</b><span>Booked for</span><b>{currentBooking.requestedHours} demo hour{currentBooking.requestedHours === 1 ? "" : "s"}</b><span>Time parked</span><b>{fDur(now - currentBooking.startedAt)}</b><span>Demo billable time</span><b>{fDur((now - currentBooking.startedAt) * 60)}</b><span>Estimated charge</span><b>{fMoney(chargeFor(now - currentBooking.startedAt, currentBooking.ratePerHour))}</b></div>
+                <p className="muted">The sensor confirms arrival. Tap the same card and let the vehicle sensor detect the car at 2–4 cm to check in. Tap again to check out.</p>
+              </> : <div className="booking-actions"><p className="muted">Reserved {fDate(currentBooking.bookedAt)} at {fTime(currentBooking.bookedAt)}. Tap RFID card <b>{currentBooking.rfidCard}</b>, then bring the car within 2–4 cm of the sensor. The system will mark it parked after both are confirmed.</p>{currentBooking.status === "reserved" && <button className="btn" onClick={() => cancelBooking(currentBooking)} disabled={busy === currentBooking.id}>Cancel reservation</button>}</div>}
+            </div>
+          ) : <>
+            <div className="booking-inputs">
+              <label>RFID card number<input value={rfidCard} onChange={(event) => setRfidCard(event.target.value)} placeholder="Example: A1B2C3D4" maxLength={16} autoComplete="off" /></label>
+              <label>Booking duration (demo minutes)<input type="number" min="1" max="24" step="1" value={bookingMinutes} onChange={(event) => setBookingMinutes(Number(event.target.value))} /></label>
+              <p className="muted">1 demo minute represents 1 parking hour. Parking starts only after the RFID card and 2–4 cm vehicle detection are confirmed.</p>
+            </div>
+            <div className="booking-slots">{availableSlots.map((slot) => <button className="book-slot" key={slot} onClick={() => bookSlot(slot)} disabled={Boolean(busy)}><span>{slot}</span><small>{busy === slot ? "Reserving…" : `Book ${bookingMinutes} hour${bookingMinutes === 1 ? "" : "s"}`}</small></button>)}{!availableSlots.length && <p className="muted">No spaces are currently available to book.</p>}</div>
+          </>}
+        </section>
+        <section className="card">
+          <div className="section-heading"><div><h3>My parking history</h3><p className="muted">Your check-in times, stay lengths, and charges.</p></div></div>
+          <div className="scroll"><table><thead><tr><th>Space</th><th>Parked in</th><th>Parked out</th><th>Duration</th><th>Amount charged</th><th>Status</th></tr></thead>
+            <tbody>{myBookings.filter((booking) => booking.status !== "cancelled").map((booking) => <tr key={booking.id}>
+              <td><b>{booking.slot}</b><div className="muted"><code>{booking.rfidCard || "—"}</code></div></td><td>{booking.startedAt ? <><div>{fDate(booking.startedAt)}</div><div className="muted">{fTime(booking.startedAt)}</div></> : "Awaiting sensor"}</td>
+              <td>{booking.finishedAt ? <><div>{fDate(booking.finishedAt)}</div><div className="muted">{fTime(booking.finishedAt)}</div></> : "—"}</td>
+              <td>{booking.status === "active" ? fDur(now - booking.startedAt) : booking.durationMs ? fDur(booking.durationMs) : "—"}</td>
+              <td><b>{booking.charged != null ? fMoney(booking.charged) : booking.status === "active" ? fMoney(chargeFor(now - booking.startedAt, booking.ratePerHour)) : "—"}</b></td>
+              <td><span className={"pill " + (booking.status === "completed" ? "gray" : booking.status === "active" ? "green" : booking.status === "card_in_use" ? "red" : "amber")}>{booking.status === "active" ? "Parked now" : booking.status === "reserved" ? "Awaiting RFID + sensor" : booking.status === "card_in_use" ? "Card already booked" : "Completed"}</span></td>
+            </tr>)}{!myBookings.some((booking) => booking.status !== "cancelled") && <tr><td colSpan="6" className="muted">Your parking history will appear here.</td></tr>}</tbody>
+          </table></div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
 /* ---------- dashboard ---------- */
 function Dashboard({ user }) {
   const [parking, setParking] = useState({});
-  const [bookingLocks, setBookingLocks] = useState({});
-  const [bookings, setBookings] = useState({});
+  const [allBookings, setAllBookings] = useState({});
   const [logs, setLogs] = useState(null);
   const [staff, setStaff] = useState({});
   const [tab, setTab] = useState("sessions");
@@ -168,18 +333,16 @@ function Dashboard({ user }) {
   const [msg, setMsg] = useState("");
   const [card, setCard] = useState("");
   const [sname, setSname] = useState("");
-  const [bookingBusy, setBookingBusy] = useState("");
   const now = useNow();
 
   useEffect(() => {
     const u1 = onValue(ref(db, "parking"), (s) => setParking(s.val() || {}), (e) => setMsg(e.message));
-    const u2 = onValue(query(ref(db, "logs"), orderByChild("t"), limitToLast(1000)),
+    const u2 = onValue(query(ref(db, "logs"), orderByChild("t"), limitToLast(10000)),
       (s) => { const a = []; s.forEach((c) => { a.push({ id: c.key, ...c.val() }); }); setLogs(a); },
       (e) => { setMsg(e.message); setLogs([]); });
     const u3 = onValue(ref(db, "staff"), (s) => setStaff(s.val() || {}));
-    const u4 = onValue(ref(db, "bookingLocks"), (s) => setBookingLocks(s.val() || {}), (e) => setMsg(e.message));
-    const u5 = onValue(ref(db, `bookings/${user.uid}`), (s) => setBookings(s.val() || {}), (e) => setMsg(e.message));
-    return () => { u1(); u2(); u3(); u4(); u5(); };
+    const u4 = onValue(ref(db, "bookings"), (s) => setAllBookings(s.val() || {}), (e) => setMsg(e.message));
+    return () => { u1(); u2(); u3(); u4(); };
   }, [user.uid]);
 
   const all = logs || [];
@@ -195,10 +358,9 @@ function Dashboard({ user }) {
   const done = sessions.filter((s) => s.outT);
   const avg = done.length ? done.reduce((a, s) => a + (s.outT - s.inT), 0) / done.length : 0;
   const free = PARKING_SLOTS.filter((k) => parking[k] === "Free").length;
-  const myBookings = Object.entries(bookings).map(([id, booking]) => ({ id, ...booking }))
+  const allBookingRows = Object.entries(allBookings).flatMap(([uid, userBookings]) =>
+    Object.entries(userBookings || {}).map(([id, booking]) => ({ id, uid, ...booking })))
     .sort((a, b) => (b.bookedAt || 0) - (a.bookedAt || 0));
-  const currentBooking = myBookings.find((booking) => booking.status === "reserved" || booking.status === "active");
-  const availableSlots = PARKING_SLOTS.filter((id) => parking[id] === "Free" && !bookingLocks[id]);
 
   const load = async () => {
     setBusy(true); setMsg("");
@@ -212,70 +374,6 @@ function Dashboard({ user }) {
     try { await set(ref(db, "staff/" + id), sname.trim()); setCard(""); setSname(""); setMsg(""); } catch (x) { setMsg(x.message); }
   };
 
-  const bookSlot = async (id) => {
-    if (currentBooking || parking[id] !== "Free" || bookingLocks[id]) return;
-    setBookingBusy(id); setMsg("");
-    const bookingRef = push(ref(db, `bookings/${user.uid}`));
-    const bookingId = bookingRef.key;
-    const bookedAt = Date.now();
-    const lockRef = ref(db, `bookingLocks/${id}`);
-    try {
-      const lock = await runTransaction(lockRef, (current) => current == null
-        ? { uid: user.uid, bookingId, bookedAt }
-        : undefined, { applyLocally: false });
-      if (!lock.committed) throw new Error("That spot was just booked. Choose another available space.");
-      try {
-        await set(bookingRef, { slot: id, status: "reserved", bookedAt, ratePerHour: PARKING_RATE });
-      } catch (error) {
-        await runTransaction(lockRef, (current) => current?.bookingId === bookingId ? null : undefined);
-        throw error;
-      }
-      setMsg(`${id} is reserved for you. Check in when you park to start the timer.`);
-    } catch (error) { setMsg(error.message); }
-    finally { setBookingBusy(""); }
-  };
-
-  const checkIn = async (booking) => {
-    setBookingBusy(booking.id); setMsg("");
-    try {
-      const result = await runTransaction(ref(db, `bookings/${user.uid}/${booking.id}`), (current) =>
-        current?.status === "reserved" ? { ...current, status: "active", startedAt: Date.now() } : undefined);
-      if (!result.committed) setMsg("This reservation is no longer available to check in.");
-    } catch (error) { setMsg(error.message); }
-    finally { setBookingBusy(""); }
-  };
-
-  const checkOut = async (booking) => {
-    setBookingBusy(booking.id); setMsg("");
-    const finishedAt = Date.now();
-    try {
-      const result = await runTransaction(ref(db, `bookings/${user.uid}/${booking.id}`), (current) => {
-        if (current?.status !== "active" || !current.startedAt) return undefined;
-        const durationMs = Math.max(0, finishedAt - current.startedAt);
-        const ratePerHour = current.ratePerHour || PARKING_RATE;
-        return { ...current, status: "completed", finishedAt, durationMs, charged: chargeFor(durationMs, ratePerHour) };
-      });
-      if (!result.committed) throw new Error("This parking session could not be checked out. Refresh and try again.");
-      const lockRef = ref(db, `bookingLocks/${booking.slot}`);
-      await runTransaction(lockRef, (current) => current?.bookingId === booking.id ? null : undefined);
-      setMsg(`Checked out. Your parking charge is ${fMoney(result.snapshot.val().charged)}.`);
-    } catch (error) { setMsg(error.message); }
-    finally { setBookingBusy(""); }
-  };
-
-  const cancelBooking = async (booking) => {
-    setBookingBusy(booking.id); setMsg("");
-    try {
-      const result = await runTransaction(ref(db, `bookings/${user.uid}/${booking.id}`), (current) =>
-        current?.status === "reserved" ? { ...current, status: "cancelled", cancelledAt: Date.now() } : undefined);
-      if (!result.committed) throw new Error("Only a reservation that has not started can be cancelled.");
-      await runTransaction(ref(db, `bookingLocks/${booking.slot}`), (current) =>
-        current?.bookingId === booking.id ? null : undefined);
-      setMsg("Reservation cancelled.");
-    } catch (error) { setMsg(error.message); }
-    finally { setBookingBusy(""); }
-  };
-
   const name = user.displayName || user.email;
   return (
     <div className="app">
@@ -284,6 +382,7 @@ function Dashboard({ user }) {
         <div className="who">
           <div className="avatar">{(name || "?")[0].toUpperCase()}</div>
           <span className="hide-sm">{name}</span>
+          <span className="role-label admin-role">Administrator</span>
           <button className="btn ghost" onClick={() => signOut(auth)}>Sign out</button>
         </div>
       </header>
@@ -291,8 +390,8 @@ function Dashboard({ user }) {
       <main className="wrap">
         <div className="title-row">
           <div>
-            <h1>Parking overview</h1>
-            <p className="muted">Records from 18 Oct 2026 · live via Firebase</p>
+            <h1>Operations overview</h1>
+            <p className="muted">Live parking activity, customer bookings, and weekly performance.</p>
           </div>
           <button className="btn" onClick={load} disabled={busy}>{busy ? "Loading…" : "↻ Load data from 18 Oct 2026"}</button>
         </div>
@@ -303,43 +402,6 @@ function Dashboard({ user }) {
           <div className="stat"><span>Cars in today</span><b>{inToday}</b></div>
           <div className="stat"><span>Cars out today</span><b>{outToday}</b></div>
           <div className="stat"><span>Average stay</span><b>{avg ? fDur(avg) : "—"}</b></div>
-        </section>
-
-        <section className="card booking-panel">
-          <div className="booking-heading">
-            <div><h3>Book a parking space</h3><p className="muted">Parking is charged at {fMoney(PARKING_RATE)} per started hour. Check in when you arrive; check out to finish your stay.</p></div>
-            <span className="rate-label">{fMoney(PARKING_RATE)} / hour</span>
-          </div>
-          {currentBooking ? (
-            <div className="active-booking">
-              <div className="booking-status"><span className={"pill " + (currentBooking.status === "active" ? "green" : "amber")}>{currentBooking.status === "active" ? "Parked now" : "Reserved"}</span><b>{currentBooking.slot}</b></div>
-              {currentBooking.status === "active" ? (
-                <>
-                  <div className="booking-cost"><span>Stay so far</span><b>{fDur(now - currentBooking.startedAt)}</b><span>Estimated charge</span><b>{fMoney(chargeFor(now - currentBooking.startedAt, currentBooking.ratePerHour))}</b></div>
-                  <button className="btn primary" onClick={() => checkOut(currentBooking)} disabled={bookingBusy === currentBooking.id}>{bookingBusy === currentBooking.id ? "Checking out…" : "Check out and calculate charge"}</button>
-                </>
-              ) : (
-                <div className="booking-actions">
-                  <p className="muted">Reserved {fDate(currentBooking.bookedAt)} at {fTime(currentBooking.bookedAt)}. Your parking timer starts when you check in.</p>
-                  <button className="btn primary" onClick={() => checkIn(currentBooking)} disabled={bookingBusy === currentBooking.id}>{bookingBusy === currentBooking.id ? "Checking in…" : "Check in and start parking"}</button>
-                  <button className="btn" onClick={() => cancelBooking(currentBooking)} disabled={bookingBusy === currentBooking.id}>Cancel reservation</button>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="booking-slots">
-              {availableSlots.map((id) => <button className="book-slot" key={id} onClick={() => bookSlot(id)} disabled={Boolean(bookingBusy)}><span>{id}</span><small>{bookingBusy === id ? "Reserving…" : "Available · Book"}</small></button>)}
-              {!availableSlots.length && <p className="muted">No spaces are currently available to book.</p>}
-            </div>
-          )}
-          {myBookings.some((booking) => booking.status === "completed") && (
-            <div className="scroll booking-history"><table>
-              <thead><tr><th>Space</th><th>Parked in</th><th>Checked out</th><th>Duration</th><th>Charge</th></tr></thead>
-              <tbody>{myBookings.filter((booking) => booking.status === "completed").map((booking) => (
-                <tr key={booking.id}><td><b>{booking.slot}</b></td><td>{fDate(booking.startedAt)} · {fTime(booking.startedAt)}</td><td>{fDate(booking.finishedAt)} · {fTime(booking.finishedAt)}</td><td>{fDur(booking.durationMs)}</td><td><b>{fMoney(booking.charged)}</b></td></tr>
-              ))}</tbody>
-            </table></div>
-          )}
         </section>
 
         <section className="grid2">
@@ -365,19 +427,19 @@ function Dashboard({ user }) {
             </div>
           </div>
           <div className="card">
-            <h3>Cars in &amp; out per day</h3>
-            {all.length ? <DayChart logs={all} /> : <p className="muted">No data yet.</p>}
+            <h3>Weekly usage &amp; booking charges</h3>
+            {all.length || allBookingRows.length ? <WeeklyTrend sessions={sessions} bookings={allBookingRows} now={now} /> : <p className="muted">Weekly trends will appear as parking activity is recorded.</p>}
           </div>
         </section>
 
         <section className="card">
           <div className="tabs-row">
             <div className="seg">
-              {[["sessions", "Parking sessions"], ["activity", "Activity log"], ["staff", "Staff"]].map(([k, l]) => (
+              {[["sessions", "Parking sessions"], ["activity", "Activity log"], ["bookings", "All bookings"], ["staff", "Staff"]].map(([k, l]) => (
                 <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>
               ))}
             </div>
-            {tab !== "staff" && (
+            {tab !== "staff" && tab !== "bookings" && (
               <div className="filters">
                 <select value={slot} onChange={(e) => setSlot(e.target.value)}><option value="all">All slots</option>{PARKING_SLOTS.map((id) => <option key={id}>{id}</option>)}</select>
                 <select value={day} onChange={(e) => setDay(e.target.value)}>
@@ -389,7 +451,7 @@ function Dashboard({ user }) {
           </div>
 
           {logs === null && <p className="muted">Loading…</p>}
-          {logs && !all.length && tab !== "staff" && (
+          {logs && !all.length && (tab === "sessions" || tab === "activity") && (
             <div className="empty">
               <p>No parking records yet.</p>
               <button className="btn primary" onClick={load} disabled={busy}>Load data from 18 Oct 2026</button>
@@ -422,6 +484,21 @@ function Dashboard({ user }) {
             </table></div>
           )}
 
+          {tab === "bookings" && (
+            <div className="scroll"><table>
+              <thead><tr><th>Customer</th><th>Space</th><th>RFID card</th><th>Booked for</th><th>Booked</th><th>Parked in</th><th>Parked out</th><th>Duration</th><th>Charge</th><th>Status</th></tr></thead>
+              <tbody>{allBookingRows.map((booking) => <tr key={`${booking.uid}-${booking.id}`}>
+                <td><div>{booking.customerName || "Customer"}</div><div className="muted">{booking.customerEmail || booking.uid}</div></td>
+                <td><b>{booking.slot}</b></td><td><code>{booking.rfidCard || "—"}</code></td><td>{booking.requestedHours ? `${booking.requestedHours} h` : "—"}</td><td>{fDate(booking.bookedAt)} · {fTime(booking.bookedAt)}</td>
+                <td>{booking.startedAt ? <>{fDate(booking.startedAt)} · {fTime(booking.startedAt)}</> : "—"}</td>
+                <td>{booking.finishedAt ? <>{fDate(booking.finishedAt)} · {fTime(booking.finishedAt)}</> : "—"}</td>
+                <td>{booking.durationMs ? fDur(booking.durationMs) : booking.status === "active" ? fDur(now - booking.startedAt) : "—"}</td>
+                <td><b>{booking.charged != null ? fMoney(booking.charged) : booking.status === "active" ? fMoney(chargeFor(now - booking.startedAt, booking.ratePerHour)) : "—"}</b></td>
+                <td><span className={"pill " + (booking.status === "completed" ? "gray" : booking.status === "active" ? "green" : "amber")}>{booking.status}</span></td>
+              </tr>)}{!allBookingRows.length && <tr><td colSpan="10" className="muted">No customer bookings yet.</td></tr>}</tbody>
+            </table></div>
+          )}
+
           {tab === "staff" && (
             <>
               <form className="row" onSubmit={addStaff}>
@@ -445,12 +522,34 @@ function Dashboard({ user }) {
       </main>
     </div>
   );
+
 }
 
 /* ---------- root ---------- */
 export default function App() {
   const [user, setUser] = useState(undefined);
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
-  if (user === undefined) return <div className="splash"><CarIcon size={40} /></div>;
-  return user ? <Dashboard user={user} /> : <AuthScreen />;
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [roleLoaded, setRoleLoaded] = useState(false);
+  useEffect(() => {
+    let requestId = 0;
+    const unsubscribe = onIdTokenChanged(auth, async (currentUser) => {
+      const currentRequest = ++requestId;
+      setUser(currentUser);
+      setIsAdmin(false);
+      setRoleLoaded(!currentUser);
+      if (!currentUser) return;
+      try {
+        const token = await getIdTokenResult(currentUser);
+        if (currentRequest === requestId) setIsAdmin(token.claims.admin === true);
+      } catch {
+        if (currentRequest === requestId) setIsAdmin(false);
+      } finally {
+        if (currentRequest === requestId) setRoleLoaded(true);
+      }
+    });
+    return unsubscribe;
+  }, []);
+  if (user === undefined || !roleLoaded) return <div className="splash"><CarIcon size={40} /></div>;
+  if (!user) return <AuthScreen />;
+  return isAdmin ? <Dashboard user={user} /> : <CustomerDashboard user={user} />;
 }
