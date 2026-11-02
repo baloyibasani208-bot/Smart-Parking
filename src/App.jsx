@@ -5,7 +5,7 @@ import {
 } from "firebase/auth";
 import { ref, onValue, query, orderByChild, limitToLast, set, remove, push, runTransaction } from "firebase/database";
 import { auth, db } from "./firebase";
-import { PARKING_SLOTS, seedDatabase } from "./seed";
+import { PARKING_SLOTS } from "./parking";
 
 /* ---------- helpers ---------- */
 const ADMIN_EMAIL = "baloyibasani208@gmail.com";
@@ -330,7 +330,6 @@ function Dashboard({ user }) {
   const [tab, setTab] = useState("sessions");
   const [slot, setSlot] = useState("all");
   const [day, setDay] = useState("all");
-  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [card, setCard] = useState("");
   const [sname, setSname] = useState("");
@@ -363,11 +362,6 @@ function Dashboard({ user }) {
     Object.entries(userBookings || {}).map(([id, booking]) => ({ id, uid, ...booking })))
     .sort((a, b) => (b.bookedAt || 0) - (a.bookedAt || 0));
 
-  const load = async () => {
-    setBusy(true); setMsg("");
-    try { await seedDatabase(db); } catch (e) { setMsg(e.message); }
-    setBusy(false);
-  };
   const addStaff = async (e) => {
     e.preventDefault();
     const id = card.trim().toUpperCase().replace(/[^0-9A-F]/g, "");
@@ -394,7 +388,6 @@ function Dashboard({ user }) {
             <h1>Operations overview</h1>
             <p className="muted">Live parking activity, customer bookings, and weekly performance.</p>
           </div>
-          <button className="btn" onClick={load} disabled={busy}>{busy ? "Loading…" : "↻ Load data from 18 Oct 2026"}</button>
         </div>
         {msg && <div className="err">{msg}</div>}
 
@@ -455,7 +448,6 @@ function Dashboard({ user }) {
           {logs && !all.length && (tab === "sessions" || tab === "activity") && (
             <div className="empty">
               <p>No parking records yet.</p>
-              <button className="btn primary" onClick={load} disabled={busy}>Load data from 18 Oct 2026</button>
             </div>
           )}
 

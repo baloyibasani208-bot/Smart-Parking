@@ -1,7 +1,7 @@
 # Smart Parking Dashboard (React + Firebase)
 1. npm install
 2. npm run dev
-3. Open the URL, sign up, then click "Load data from 18 Oct 2026" to seed three parking slots and demo staff Basani Baloyi and Differ Ngobeni.
+3. Open the URL and sign up. Live parking data comes from the Firebase Realtime Database.
 
 ## Firebase setup
 
@@ -30,6 +30,18 @@ read operational records, and sensor writes require the `sensor: true` custom
 claim. Never put a Firebase Admin service-account key in ESP32 firmware.
 
 ## ESP32 event contract
+
+The web dashboard subscribes directly to the Firebase Realtime Database, so
+changes written there appear live. Signing in to Arduino Cloud does not itself
+connect the device to Firebase; the supplied ESP32 sketch writes to Firebase
+directly through `FirebaseESP32`.
+
+The Firebase Web API key is not a Realtime Database secret and cannot be used
+as `legacy_token`. The database rules require the device to authenticate as a
+Firebase Auth identity with the `sensor: true` custom claim before it can write
+parking and log data. Do not embed a database secret or Admin SDK credential in
+the firmware. The sketch's `/rfid/cardID` and `/rfid/t` writes also need
+corresponding database rules if the dashboard is expected to store them.
 
 The snippet supplied in chat is the Firebase **web SDK config** already used by
 `src/firebase.js`; it does not read an RFID reader or distance sensor. The
