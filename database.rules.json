@@ -11,7 +11,7 @@
       ".write": "auth != null && (auth.token.email == 'baloyibasani208@gmail.com' || auth.token.sensor == true)"
     },
     "staff": {
-      ".read": "auth != null && auth.token.email == 'baloyibasani208@gmail.com'",
+      ".read": "auth != null && (auth.token.email == 'baloyibasani208@gmail.com' || auth.token.sensor == true)",
       ".write": "auth != null && auth.token.email == 'baloyibasani208@gmail.com'"
     },
     "bookings": {
@@ -31,6 +31,14 @@
     "bookingByCard": {
       ".read": false,
       ".write": false
+    },
+    "rfid": {
+      "cardID": {
+        ".write": "auth != null && auth.token.sensor == true"
+      },
+      "t": {
+        ".write": "auth != null && auth.token.sensor == true"
+      }
     }
   }
 }
