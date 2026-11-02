@@ -8,7 +8,7 @@ import { auth, db } from "./firebase";
 import { PARKING_SLOTS, seedDatabase } from "./seed";
 
 /* ---------- helpers ---------- */
-const ADMIN_EMAIL = "baloyibasani@gmail.com";
+const ADMIN_EMAIL = "baloyibasani208@gmail.com";
 const ERR = {
   "auth/invalid-credential": "Wrong email or password.",
   "auth/user-not-found": "No account with that email.",
