@@ -60,12 +60,11 @@ or 2–4 cm entry distance do not start a booked stay.
 
 ## Customer and administrator access
 
-The verified Firebase Authentication account `baloyibasani208@gmail.com` receives
+The Firebase Authentication account `baloyibasani208@gmail.com` receives
 the administrator view. Other signed-in users receive the customer view and
 subscribe only to their own `bookings/{uid}` data. Admin access to logs, staff,
 all bookings, and the usage chart is restricted by the Realtime Database rules
-to that same verified email. If the account's email is not verified, verify it
-in Firebase Authentication before signing in again.
+to that same email.
 
 ## GitHub Pages
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  onIdTokenChanged, getIdTokenResult, signInWithEmailAndPassword,
+  onIdTokenChanged, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, updateProfile, signOut,
 } from "firebase/auth";
 import { ref, onValue, query, orderByChild, limitToLast, set, remove, push, runTransaction } from "firebase/database";
@@ -533,22 +533,12 @@ export default function App() {
   const [roleLoaded, setRoleLoaded] = useState(false);
   useEffect(() => {
     let requestId = 0;
-    const unsubscribe = onIdTokenChanged(auth, async (currentUser) => {
+    const unsubscribe = onIdTokenChanged(auth, (currentUser) => {
       const currentRequest = ++requestId;
       setUser(currentUser);
-      setIsAdmin(false);
-      setRoleLoaded(!currentUser);
-      if (!currentUser) return;
-      try {
-        const token = await getIdTokenResult(currentUser);
-        const isBasani = token.claims.email_verified === true
-          && String(token.claims.email || "").toLowerCase() === ADMIN_EMAIL;
-        if (currentRequest === requestId) setIsAdmin(isBasani);
-      } catch {
-        if (currentRequest === requestId) setIsAdmin(false);
-      } finally {
-        if (currentRequest === requestId) setRoleLoaded(true);
-      }
+      const isBasani = String(currentUser?.email || "").trim().toLowerCase() === ADMIN_EMAIL;
+      if (currentRequest === requestId) setIsAdmin(isBasani);
+      setRoleLoaded(true);
     });
     return unsubscribe;
   }, []);
